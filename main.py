@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from groq import Groq
 from pypdf import PdfReader
+import time
 from docx import Document
 import json
 
@@ -39,9 +40,13 @@ class Resume(BaseModel):
     Phone:int | None=None
     Total_experience_Year:float | None=None
     Skills:list[str] = []
-    Experience=list[Experience] = []
+    Experiences:list[Experience] = []
     Projects:list[str] = []
     Certifications:list[str] = []
+
+class MatchResult(BaseModel):
+    score:float
+    details:dict
 
 JobDescription_schema = JobDescription.model_json_schema()
 Experience_schema =Experience.model_json_schema()
@@ -143,13 +148,60 @@ Important rules:
         messages = messages,
         response_format=response_format
     ).choices[0].message.content
-    data = json.load(raw)
+    data = json.loads(raw)
     resume = Resume(**data)
     return resume
+
+def final_score(job, resume):
+    match_schema = MatchResult.model_json_schema()
+    prompt = f"""
+You are an HR recruiter.
+
+Compare the candidate's resume with the job description.
+
+JOB DESCRIPTION:
+{job.model_dump_json(indent=2)}
+
+CANDIDATE RESUME:
+{resume.model_dump_json(indent=2)}
+Return JSON matching this schema:
+
+{match_schema}
+
+Give me:
+
+1. Candidate name
+2. Matching skills
+3. Missing important skills
+4. Whether experience requirement is met
+5. Overall match percentage from 0 to 100
+6. A short final verdict
+Keep the response concise and easy to read.
+"""
+
+    message = {
+        "role": "user",
+        "content": prompt
+    }
+    messages = [message]
+
+    response_format = {
+        "type": "json_object"
+    }
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        response_format=response_format
+    )
+
+    data = json.loads(response.choices[0].message.content)
+    return MatchResult(**data)
 
 def read_pdf(file_path):
     reader = PdfReader(file_path)
     text = ""
+    pgtext=""
     for page in reader.pages:
         pgtext += page.extract_text()
         if pgtext:
@@ -179,13 +231,50 @@ def read_resume(file_path):
     else:
         return None
 
-# we got text resume
+
 resume_folder = Path("resume")
 all_result = []
 for file_path in resume_folder.iterdir():
     # file path contain all paths of files
-    if file_path.suffix.lower() not in [".pdf",".docx"]
+    if file_path.suffix.lower() not in [".pdf",".docx"]:
         continue 
     print("\nProcessing: ",file_path)
     Resume_text = read_resume(file_path)
     parsed_resume = parse_resume(Resume_text);
+    time.sleep(5) # rate limiting hence
+    result = final_score(Job_D,parsed_resume)
+    time.sleep(5)
+    print("Score",result.score)
+    all_result.append({
+        "name":parsed_resume.Name,
+        "score":result.score,
+        "details":result.details
+    })
+
+all_result.sort(
+    key=lambda candidate:candidate["score"],
+    reverse=True
+)
+top_2 = all_result[:2]
+wrost_2 = all_result[-2:]
+
+print("Top 2")
+for candidate in top_2:
+    print(
+        candidate["name"],
+        "-",
+        candidate["score"],
+        "%"
+    )
+    print(candidate["details"])
+
+print("Lowest 2")
+for candidate in wrost_2:
+    print(
+        candidate["name"],
+        "-",
+        candidate["score"],
+        "%"
+    )
+    print(candidate["details"])
+    
